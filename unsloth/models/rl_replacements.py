@@ -402,12 +402,90 @@ grpo_compute_loss      = RL_REPLACEMENTS["grpo_compute_loss"]
 grpo_compute_loss_slow = RL_REPLACEMENTS["grpo_compute_loss_slow"]
 UnslothEfficientGRPO   = RL_REPLACEMENTS["UnslothEfficientGRPO"]
 grpo_accumulated_loss  = RL_REPLACEMENTS["grpo_accumulated_loss"]
+
+# Adaptive KL utility functions
+def adaptive_kl_clip(kl_divergence, kl_clip_threshold):
+    """Clip KL divergence to prevent pathological exploitation."""
+    return torch.clamp(kl_divergence, max=kl_clip_threshold)
+
+def adaptive_kl_sigmoid(kl_divergence, kl_target):
+    """Apply sigmoid-based soft clipping to KL divergence."""
+    return torch.sigmoid(kl_divergence - kl_target) * kl_divergence
+
+def adaptive_kl_length_normalized(kl_divergence, completion_length):
+    """Normalize KL divergence by sequence length."""
+    return kl_divergence / completion_length.unsqueeze(1)
+
+def adaptive_kl_dynamic_beta(trainer, mean_reward, step):
+    """Dynamically adjust beta based on reward convergence."""
+    args = trainer.args
+    current_beta = trainer.beta
+    
+    # Initialize tracking if not exists
+    if not hasattr(trainer, '_adaptive_kl_state'):
+        trainer._adaptive_kl_state = {
+            'reward_history': [],
+            'original_beta': current_beta,
+            'current_beta': current_beta,
+        }
+    
+    state = trainer._adaptive_kl_state
+    state['reward_history'].append(mean_reward)
+    
+    # Keep only recent reward history
+    if len(state['reward_history']) > 100:
+        state['reward_history'] = state['reward_history'][-100:]
+    
+    # Check if we should decay beta
+    if len(state['reward_history']) >= 10:
+        recent_reward = sum(state['reward_history'][-10:]) / 10
+        if recent_reward > args.reward_threshold:
+            state['current_beta'] *= args.dynamic_beta_decay
+            state['current_beta'] = max(state['current_beta'], args.beta_min)
+    
+    # Step-based schedule
+    if step > args.beta_schedule_steps:
+        state['current_beta'] = args.beta_min
+    
+    return state['current_beta']
+
+def apply_adaptive_kl(trainer, raw_kl, completion_length, mean_reward=None, step=None):
+    """Apply adaptive KL modifications based on configuration."""
+    args = trainer.args
+    method = getattr(args, 'kl_adaptation_method', 'none')
+    
+    if method == 'none':
+        return raw_kl, trainer.beta
+    
+    adapted_kl = raw_kl
+    current_beta = trainer.beta
+    
+    if method == 'clip':
+        adapted_kl = adaptive_kl_clip(raw_kl, args.kl_clip_threshold)
+    elif method == 'sigmoid':
+        adapted_kl = adaptive_kl_sigmoid(raw_kl, args.kl_target)
+    elif method == 'length_normalized':
+        adapted_kl = adaptive_kl_length_normalized(raw_kl, completion_length)
+    elif method == 'dynamic':
+        if mean_reward is not None and step is not None:
+            current_beta = adaptive_kl_dynamic_beta(trainer, mean_reward, step)
+        else:
+            # Fallback to original beta if reward/step not available
+            current_beta = trainer.beta
+    
+    return adapted_kl, current_beta
+
 RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(grpo_compute_loss))
 RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(UnslothEfficientGRPO))
 RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(grpo_accumulated_loss))
 RL_PRE_ITEMS["grpo_trainer"].append(grpo_compute_loss_slow)
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_clip))
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_sigmoid))
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_length_normalized))
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_dynamic_beta))
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(apply_adaptive_kl))
 
-# Edit _get_per_token_logps to handle mixed precision
+# Edit _get_per_token_logps to handle mixed precision and add adaptive KL
 def grpo_trainer_compute_loss(function_name, function):
     if  function_name != "compute_loss": return function
 
@@ -437,7 +515,8 @@ def grpo_trainer_compute_loss(function_name, function):
         # Compute the KL divergence between the model and the reference model
         # _prepare_inputs doesn't return reference log probs anymore. We need to calculate it ourselves.
         # https://github.com/huggingface/trl/blob/05bc43e960396581e458195b8388efe6b82cae1f/trl/trainer/grpo_trainer.py#L1328
-        if self.beta != 0.0:
+        original_beta = self.beta
+        if original_beta != 0.0:
             with torch.inference_mode(), model.disable_adapter():
                 ref_per_token_logps = per_token_logps = get_logps_func(model, input_ids, attention_mask, logits_to_keep)
         else:
@@ -459,6 +538,9 @@ def grpo_trainer_compute_loss(function_name, function):
         logit_scale_divide = getattr(model.config, "logits_scaling", 0) # Granite
         if logit_scale_divide is None: logit_scale_divide = 0
 
+        # Get current training step and reward for dynamic adaptation
+        current_step = self.state.global_step if hasattr(self, 'state') else 0
+        mean_reward = torch.mean(advantages).item() if advantages is not None else 0.0
 
         if per_token_logps is not None:
 
@@ -472,7 +554,7 @@ def grpo_trainer_compute_loss(function_name, function):
                 old_hidden_states,
                 input_ids,
                 completion_mask,
-                self.beta,
+                original_beta,
                 advantages,
                 loss_type = self.args.loss_type,
                 epsilon_low = self.epsilon_low,
@@ -484,6 +566,54 @@ def grpo_trainer_compute_loss(function_name, function):
                 logit_scale_multiply = logit_scale_multiply,
                 logit_scale_divide = logit_scale_divide,
             )
+            
+            # Apply adaptive KL after computing the loss
+            if getattr(self.args, 'kl_adaptation_method', 'none') != 'none':
+                raw_kl = mean_kl
+                adapted_kl, current_beta = apply_adaptive_kl(
+                    self, raw_kl, completion_length, mean_reward, current_step
+                )
+                
+                # Recompute loss with adapted KL and beta if needed
+                if current_beta != original_beta:
+                    # Update beta temporarily for loss computation
+                    temp_beta = self.beta
+                    self.beta = current_beta
+                    loss, completion_length, mean_kl = grpo_compute_loss_slow(
+                        ref_per_token_logps,
+                        per_token_logps,
+                        old_hidden_states,
+                        input_ids,
+                        completion_mask,
+                        current_beta,
+                        advantages,
+                        loss_type = self.args.loss_type,
+                        epsilon_low = self.epsilon_low,
+                        epsilon_high = self.epsilon_high,
+                        max_completion_length = self.args.max_completion_length,
+                        delta = self.args.delta,
+                        temperature = self.args.temperature,
+                        logit_softcapping = logit_softcapping,
+                        logit_scale_multiply = logit_scale_multiply,
+                        logit_scale_divide = logit_scale_divide,
+                    )
+                    self.beta = temp_beta  # Restore original beta
+                else:
+                    adapted_kl = mean_kl
+                    current_beta = original_beta
+                    
+                # Log adaptive KL metrics
+                if "train" in self._metrics:
+                    mode = "eval" if self.control.should_evaluate else "train"
+                    if "adaptive_kl/raw_kl" in self._metrics[mode]:
+                        self._metrics[mode]["adaptive_kl/raw_kl"].append(raw_kl.item())
+                        self._metrics[mode]["adaptive_kl/adapted_kl"].append(adapted_kl.item())
+                        self._metrics[mode]["adaptive_kl/current_beta"].append(current_beta)
+                elif hasattr(self, '_metrics') and "adaptive_kl/raw_kl" in self._metrics:
+                    self._metrics["adaptive_kl/raw_kl"].append(raw_kl.item())
+                    self._metrics["adaptive_kl/adapted_kl"].append(adapted_kl.item())
+                    self._metrics["adaptive_kl/current_beta"].append(current_beta)
+                    
         else:
             if hasattr(self.args, "loss_type"):
                 loss, completion_length, mean_kl = grpo_accumulated_loss(
@@ -521,12 +651,27 @@ def grpo_trainer_compute_loss(function_name, function):
                     logit_scale_divide = logit_scale_divide,
                     attention_mask = attention_mask,
                 )
-            pass
-        pass
-        # Log the metrics
-        # completion_length = self.accelerator.gather_for_metrics(completion_mask.sum(1)).float().mean().item()
-        # mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
-        # self._metrics["kl"].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
+            
+            # Apply adaptive KL for accumulated loss path too
+            if getattr(self.args, 'kl_adaptation_method', 'none') != 'none':
+                raw_kl = mean_kl
+                adapted_kl, current_beta = apply_adaptive_kl(
+                    self, raw_kl, completion_length, mean_reward, current_step
+                )
+                
+                # Log adaptive KL metrics
+                if "train" in self._metrics:
+                    mode = "eval" if self.control.should_evaluate else "train"
+                    if "adaptive_kl/raw_kl" in self._metrics[mode]:
+                        self._metrics[mode]["adaptive_kl/raw_kl"].append(raw_kl.item())
+                        self._metrics[mode]["adaptive_kl/adapted_kl"].append(adapted_kl.item())
+                        self._metrics[mode]["adaptive_kl/current_beta"].append(current_beta)
+                elif hasattr(self, '_metrics') and "adaptive_kl/raw_kl" in self._metrics:
+                    self._metrics["adaptive_kl/raw_kl"].append(raw_kl.item())
+                    self._metrics["adaptive_kl/adapted_kl"].append(adapted_kl.item())
+                    self._metrics["adaptive_kl/current_beta"].append(current_beta)
+                    
+        # Log the standard metrics
         if "train" in self._metrics:
             mode = "eval" if self.control.should_evaluate else "train"
             self._metrics[mode]["completion_length"].append(completion_length.item())
@@ -559,6 +704,36 @@ pass
 RL_CONFIG_CHANGES["grpo_trainer"].append(grpo_trainer_fix_batch_size)
 
 
+# Add adaptive KL configuration parameters and validation
+def grpo_trainer_adaptive_kl_config(RLTrainer_source, RLConfig_source):
+    if "beta" not in RLConfig_source: return ""
+    
+    adaptive_kl_config = \
+    "# Adaptive KL configuration\n"\
+    "kl_adaptation_method = getattr(locals(), 'kl_adaptation_method', 'none')\n"\
+    "if kl_adaptation_method not in ['none', 'clip', 'sigmoid', 'dynamic', 'length_normalized']:\n"\
+    "    raise ValueError(f'Unsloth: kl_adaptation_method must be one of: none, clip, sigmoid, dynamic, length_normalized. Got: {kl_adaptation_method}')\n"\
+    "kl_clip_threshold = getattr(locals(), 'kl_clip_threshold', 1.0)\n"\
+    "kl_target = getattr(locals(), 'kl_target', 0.1)\n"\
+    "dynamic_beta_decay = getattr(locals(), 'dynamic_beta_decay', 0.9)\n"\
+    "reward_threshold = getattr(locals(), 'reward_threshold', 0.8)\n"\
+    "beta_min = getattr(locals(), 'beta_min', 0.0)\n"\
+    "beta_schedule_steps = getattr(locals(), 'beta_schedule_steps', 1000)\n"\
+    "print(f'Unsloth: Using adaptive KL method: {kl_adaptation_method}')\n"\
+    "if kl_adaptation_method == 'clip':\n"\
+    "    print(f'Unsloth: KL clip threshold: {kl_clip_threshold}')\n"\
+    "elif kl_adaptation_method == 'sigmoid':\n"\
+    "    print(f'Unsloth: KL target: {kl_target}')\n"\
+    "elif kl_adaptation_method == 'dynamic':\n"\
+    "    print(f'Unsloth: Dynamic beta decay: {dynamic_beta_decay}, reward threshold: {reward_threshold}')\n"\
+    "elif kl_adaptation_method == 'length_normalized':\n"\
+    "    print(f'Unsloth: Using length-normalized KL')\n"
+    
+    return adaptive_kl_config
+pass
+RL_CONFIG_CHANGES["grpo_trainer"].append(grpo_trainer_adaptive_kl_config)
+
+
 # Add other reward function names
 def grpo_trainer_metrics(RLTrainer_source, RLConfig_source):
     if "reward_funcs" not in RLTrainer_source: return ""
@@ -588,3 +763,15 @@ def grpo_trainer_metrics(RLTrainer_source, RLConfig_source):
     return log_metrics
 pass
 RL_METRICS_CHANGES["grpo_trainer"].append(grpo_trainer_metrics)
+
+
+# Add adaptive KL metrics tracking
+def grpo_trainer_adaptive_kl_metrics(RLTrainer_source, RLConfig_source):
+    if "adaptive KL" not in RLTrainer_source: return ""
+    
+    adaptive_kl_metrics = \
+    "other_metrics.extend(['adaptive_kl/raw_kl', 'adaptive_kl/adapted_kl', 'adaptive_kl/current_beta'])\n"
+    
+    return adaptive_kl_metrics
+pass
+RL_METRICS_CHANGES["grpo_trainer"].append(grpo_trainer_adaptive_kl_metrics)

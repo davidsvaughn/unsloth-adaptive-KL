@@ -133,15 +133,58 @@ class Unsloth{RLConfig_name}({RLConfig_name}):
         default = -1,
         metadata = {{'help': 'Chunk size to reduce memory usage. -1 is most efficient.'}},
     )
+    # Adaptive KL parameters
+    kl_adaptation_method: Optional[str] = field(
+        default = 'none',
+        metadata = {{'help': 'Method for adaptive KL divergence: none, clip, sigmoid, dynamic, length_normalized'}},
+    )
+    kl_clip_threshold: Optional[float] = field(
+        default = 1.0,
+        metadata = {{'help': 'Threshold for clipping KL divergence'}},
+    )
+    kl_target: Optional[float] = field(
+        default = 0.1,
+        metadata = {{'help': 'Target KL divergence for sigmoid clipping'}},
+    )
+    dynamic_beta_decay: Optional[float] = field(
+        default = 0.9,
+        metadata = {{'help': 'Decay factor for dynamic beta scheduling'}},
+    )
+    reward_threshold: Optional[float] = field(
+        default = 0.8,
+        metadata = {{'help': 'Reward threshold for dynamic beta scheduling'}},
+    )
+    beta_min: Optional[float] = field(
+        default = 0.0,
+        metadata = {{'help': 'Minimum beta value for dynamic scheduling'}},
+    )
+    beta_schedule_steps: Optional[int] = field(
+        default = 1000,
+        metadata = {{'help': 'Steps after which to set beta to minimum'}},
+    )
     def __init__({RLConfig_arguments},
         vllm_sampling_params = None,
         unsloth_num_chunks = -1,
+        kl_adaptation_method = 'none',
+        kl_clip_threshold = 1.0,
+        kl_target = 0.1,
+        dynamic_beta_decay = 0.9,
+        reward_threshold = 0.8,
+        beta_min = 0.0,
+        beta_schedule_steps = 1000,
         **kwargs,
     ):
 {RLConfig_extra_args}
         super().__init__({RLConfig_call_args}{RLConfig_kwargs})
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
+        self.kl_adaptation_method = kl_adaptation_method
+        self.kl_clip_threshold = kl_clip_threshold
+        self.kl_target = kl_target
+        self.dynamic_beta_decay = dynamic_beta_decay
+        self.reward_threshold = reward_threshold
+        self.beta_min = beta_min
+        self.beta_schedule_steps = beta_schedule_steps
 pass
 
 {RLTrainer_extras}
