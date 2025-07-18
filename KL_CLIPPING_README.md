@@ -16,7 +16,7 @@ When the reward term saturates, models often exploit the KL term by generating l
 
 This implementation provides two simple methods to prevent pathological KL exploitation:
 
-### 1. **Hard Clipping** (`kl_adaptation_method="hard"`)
+### 1. **Hard Clipping** (`kl_clip_method="hard"`)
 Uses a ReLU-like function to clip KL divergence:
 ```python
 kl_term = max(0, KL(p || p_ref) - kl_clip_threshold)
@@ -24,7 +24,7 @@ kl_term = max(0, KL(p || p_ref) - kl_clip_threshold)
 
 **Use case:** When you want to completely eliminate KL values below the threshold while preserving gradient flow above it.
 
-### 2. **Soft Clipping** (`kl_adaptation_method="soft"`)
+### 2. **Soft Clipping** (`kl_clip_method="soft"`)
 Uses a softplus function for smooth clipping:
 ```python
 import torch.nn.functional as F
@@ -43,14 +43,14 @@ from trl import GRPOConfig, GRPOTrainer
 # Hard clipping example
 training_args = GRPOConfig(
     # ... other arguments ...
-    kl_adaptation_method="hard",
+    kl_clip_method="hard",
     kl_clip_threshold=0.5,
 )
 
 # Soft clipping example  
 training_args = GRPOConfig(
     # ... other arguments ...
-    kl_adaptation_method="soft",
+    kl_clip_method="soft",
     kl_clip_threshold=0.5,
 )
 
@@ -75,8 +75,49 @@ training_args = GRPOConfig(
     beta=0.001,  # Base KL coefficient
     
     # KL clipping parameters
-    kl_adaptation_method="hard",  # Options: "none", "hard", "soft"
-    kl_clip_threshold=0.5,       # Threshold for clipping
+    kl_clip_method="hard",           # Options: "none", "hard", "soft"
+    kl_clip_threshold=0.5,           # Threshold for clipping
+    use_per_token_kl_threshold=True, # If True, threshold is per-token (default: True)
+)
+```
+
+### Per-Token vs Total KL Thresholds
+
+**Per-Token Threshold (Recommended)**: When `use_per_token_kl_threshold=True` (default), the `kl_clip_threshold` is interpreted as a per-token KL divergence threshold. This is scaled by the reference sequence length to compute the actual total KL threshold used for clipping.
+
+**Total KL Threshold**: When `use_per_token_kl_threshold=False`, the `kl_clip_threshold` is used directly as the total KL threshold without any scaling.
+
+#### Benefits of Per-Token Thresholds
+
+1. **Intuitive threshold setting**: "0.1 nats per token" is much more interpretable than total KL values
+2. **Length-agnostic**: Same threshold works whether generating 10 tokens or 100 tokens
+3. **Transferable**: Thresholds learned on one task/length distribution transfer to others
+4. **Prevents gaming**: Model can't manipulate threshold by generating longer sequences
+5. **Stable**: Threshold is based on reference sequence length, not generated length
+
+#### How It Works
+
+```python
+# For per-token thresholds
+total_kl_threshold = per_token_kl_threshold * reference_sequence_length
+
+# Example: 0.1 nats per token × 50 tokens = 5.0 total nats threshold
+```
+
+**Example:**
+```python
+# Per-token threshold (recommended)
+training_args = GRPOConfig(
+    kl_clip_method="soft",
+    kl_clip_threshold=0.1,           # 0.1 nats per token
+    use_per_token_kl_threshold=True, # Scale by reference length
+)
+
+# Total KL threshold (legacy behavior)
+training_args = GRPOConfig(
+    kl_clip_method="soft",
+    kl_clip_threshold=5.0,            # 5.0 total nats
+    use_per_token_kl_threshold=False, # Use threshold directly
 )
 ```
 

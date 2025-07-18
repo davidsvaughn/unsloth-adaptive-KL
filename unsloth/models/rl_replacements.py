@@ -404,42 +404,84 @@ UnslothEfficientGRPO   = RL_REPLACEMENTS["UnslothEfficientGRPO"]
 grpo_accumulated_loss  = RL_REPLACEMENTS["grpo_accumulated_loss"]
 
 # Simple KL clipping functions
-def adaptive_kl_hard_clip(kl_divergence, kl_clip_threshold):
-    """Hard clipping using ReLU-like function: max(0, KL - threshold)."""
-    return torch.clamp(kl_divergence - kl_clip_threshold, min=0.0)
+def kl_hard_clip(kl_divergence, kl_clip_threshold, reference_length=None, use_per_token_threshold=True):
+    """Hard clipping using ReLU-like function: max(0, KL - threshold).
+    
+    Args:
+        kl_divergence: Total KL divergence to clip
+        kl_clip_threshold: Threshold value (per-token if use_per_token_threshold=True, total if False)
+        reference_length: Reference sequence length for per-token threshold calculation
+        use_per_token_threshold: If True, interpret threshold as per-token and scale by reference_length
+    """
+    if use_per_token_threshold and reference_length is not None:
+        # Convert per-token threshold to total threshold based on reference length
+        total_threshold = kl_clip_threshold * reference_length
+    else:
+        # Use threshold directly as total KL threshold
+        total_threshold = kl_clip_threshold
+    
+    return torch.clamp(kl_divergence - total_threshold, min=0.0)
 
-def adaptive_kl_soft_clip(kl_divergence, kl_clip_threshold):
-    """Soft clipping using softplus: F.softplus(KL - threshold)."""
+def kl_soft_clip(kl_divergence, kl_clip_threshold, reference_length=None, use_per_token_threshold=True):
+    """Soft clipping using softplus: F.softplus(KL - threshold).
+    
+    Args:
+        kl_divergence: Total KL divergence to clip
+        kl_clip_threshold: Threshold value (per-token if use_per_token_threshold=True, total if False)
+        reference_length: Reference sequence length for per-token threshold calculation
+        use_per_token_threshold: If True, interpret threshold as per-token and scale by reference_length
+    """
     import torch.nn.functional as F
-    return F.softplus(kl_divergence - kl_clip_threshold)
+    
+    if use_per_token_threshold and reference_length is not None:
+        # Convert per-token threshold to total threshold based on reference length
+        total_threshold = kl_clip_threshold * reference_length
+    else:
+        # Use threshold directly as total KL threshold
+        total_threshold = kl_clip_threshold
+    
+    return F.softplus(kl_divergence - total_threshold)
 
-def apply_adaptive_kl(trainer, raw_kl, completion_length, mean_reward=None, step=None):
+def apply_kl_clip(trainer, raw_kl, completion_length, mean_reward=None, step=None):
     """Apply KL clipping based on configuration."""
     args = trainer.args
-    method = getattr(args, 'kl_adaptation_method', 'none')
+    method = getattr(args, 'kl_clip_method', 'none')
     
     if method == 'none':
         return raw_kl, trainer.beta
     
-    adapted_kl = raw_kl
+    clipped_kl = raw_kl
     current_beta = trainer.beta
     
-    if method == 'hard':
-        adapted_kl = adaptive_kl_hard_clip(raw_kl, args.kl_clip_threshold)
-    elif method == 'soft':
-        adapted_kl = adaptive_kl_soft_clip(raw_kl, args.kl_clip_threshold)
+    # Get configuration for per-token threshold
+    use_per_token_threshold = getattr(args, 'use_per_token_kl_threshold', True)
     
-    return adapted_kl, current_beta
+    if method == 'hard':
+        clipped_kl = kl_hard_clip(
+            raw_kl, 
+            args.kl_clip_threshold, 
+            reference_length=completion_length,
+            use_per_token_threshold=use_per_token_threshold
+        )
+    elif method == 'soft':
+        clipped_kl = kl_soft_clip(
+            raw_kl, 
+            args.kl_clip_threshold, 
+            reference_length=completion_length,
+            use_per_token_threshold=use_per_token_threshold
+        )
+    
+    return clipped_kl, current_beta
 
 RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(grpo_compute_loss))
 RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(UnslothEfficientGRPO))
 RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(grpo_accumulated_loss))
 RL_PRE_ITEMS["grpo_trainer"].append(grpo_compute_loss_slow)
-RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_hard_clip))
-RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_soft_clip))
-RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(apply_adaptive_kl))
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(kl_hard_clip))
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(kl_soft_clip))
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(apply_kl_clip))
 
-# Edit _get_per_token_logps to handle mixed precision and add adaptive KL
+# Edit _get_per_token_logps to handle mixed precision and add KL clipping
 def grpo_trainer_compute_loss(function_name, function):
     if  function_name != "compute_loss": return function
 
@@ -521,14 +563,14 @@ def grpo_trainer_compute_loss(function_name, function):
                 logit_scale_divide = logit_scale_divide,
             )
             
-            # Apply adaptive KL after computing the loss
-            if getattr(self.args, 'kl_adaptation_method', 'none') != 'none':
+            # Apply KL clipping after computing the loss
+            if getattr(self.args, 'kl_clip_method', 'none') != 'none':
                 raw_kl = mean_kl
-                adapted_kl, current_beta = apply_adaptive_kl(
+                clipped_kl, current_beta = apply_kl_clip(
                     self, raw_kl, completion_length, mean_reward, current_step
                 )
                 
-                # Recompute loss with adapted KL and beta if needed
+                # Recompute loss with clipped KL and beta if needed
                 if current_beta != original_beta:
                     # Update beta temporarily for loss computation
                     temp_beta = self.beta
@@ -553,20 +595,20 @@ def grpo_trainer_compute_loss(function_name, function):
                     )
                     self.beta = temp_beta  # Restore original beta
                 else:
-                    adapted_kl = mean_kl
+                    clipped_kl = mean_kl
                     current_beta = original_beta
                     
-                # Log adaptive KL metrics
+                # Log KL clipping metrics
                 if "train" in self._metrics:
                     mode = "eval" if self.control.should_evaluate else "train"
-                    if "adaptive_kl/raw_kl" in self._metrics[mode]:
-                        self._metrics[mode]["adaptive_kl/raw_kl"].append(raw_kl.item())
-                        self._metrics[mode]["adaptive_kl/adapted_kl"].append(adapted_kl.item())
-                        self._metrics[mode]["adaptive_kl/current_beta"].append(current_beta)
-                elif hasattr(self, '_metrics') and "adaptive_kl/raw_kl" in self._metrics:
-                    self._metrics["adaptive_kl/raw_kl"].append(raw_kl.item())
-                    self._metrics["adaptive_kl/adapted_kl"].append(adapted_kl.item())
-                    self._metrics["adaptive_kl/current_beta"].append(current_beta)
+                    if "kl_clip/raw_kl" in self._metrics[mode]:
+                        self._metrics[mode]["kl_clip/raw_kl"].append(raw_kl.item())
+                        self._metrics[mode]["kl_clip/clipped_kl"].append(clipped_kl.item())
+                        self._metrics[mode]["kl_clip/current_beta"].append(current_beta)
+                elif hasattr(self, '_metrics') and "kl_clip/raw_kl" in self._metrics:
+                    self._metrics["kl_clip/raw_kl"].append(raw_kl.item())
+                    self._metrics["kl_clip/clipped_kl"].append(clipped_kl.item())
+                    self._metrics["kl_clip/current_beta"].append(current_beta)
                     
         else:
             if hasattr(self.args, "loss_type"):
@@ -606,24 +648,24 @@ def grpo_trainer_compute_loss(function_name, function):
                     attention_mask = attention_mask,
                 )
             
-            # Apply adaptive KL for accumulated loss path too
-            if getattr(self.args, 'kl_adaptation_method', 'none') != 'none':
+            # Apply KL clipping for accumulated loss path too
+            if getattr(self.args, 'kl_clip_method', 'none') != 'none':
                 raw_kl = mean_kl
-                adapted_kl, current_beta = apply_adaptive_kl(
+                clipped_kl, current_beta = apply_kl_clip(
                     self, raw_kl, completion_length, mean_reward, current_step
                 )
                 
-                # Log adaptive KL metrics
+                # Log KL clipping metrics
                 if "train" in self._metrics:
                     mode = "eval" if self.control.should_evaluate else "train"
-                    if "adaptive_kl/raw_kl" in self._metrics[mode]:
-                        self._metrics[mode]["adaptive_kl/raw_kl"].append(raw_kl.item())
-                        self._metrics[mode]["adaptive_kl/adapted_kl"].append(adapted_kl.item())
-                        self._metrics[mode]["adaptive_kl/current_beta"].append(current_beta)
-                elif hasattr(self, '_metrics') and "adaptive_kl/raw_kl" in self._metrics:
-                    self._metrics["adaptive_kl/raw_kl"].append(raw_kl.item())
-                    self._metrics["adaptive_kl/adapted_kl"].append(adapted_kl.item())
-                    self._metrics["adaptive_kl/current_beta"].append(current_beta)
+                    if "kl_clip/raw_kl" in self._metrics[mode]:
+                        self._metrics[mode]["kl_clip/raw_kl"].append(raw_kl.item())
+                        self._metrics[mode]["kl_clip/clipped_kl"].append(clipped_kl.item())
+                        self._metrics[mode]["kl_clip/current_beta"].append(current_beta)
+                elif hasattr(self, '_metrics') and "kl_clip/raw_kl" in self._metrics:
+                    self._metrics["kl_clip/raw_kl"].append(raw_kl.item())
+                    self._metrics["kl_clip/clipped_kl"].append(clipped_kl.item())
+                    self._metrics["kl_clip/current_beta"].append(current_beta)
                     
         # Log the standard metrics
         if "train" in self._metrics:
@@ -659,24 +701,30 @@ RL_CONFIG_CHANGES["grpo_trainer"].append(grpo_trainer_fix_batch_size)
 
 
 # Add simplified KL clipping configuration parameters and validation
-def grpo_trainer_adaptive_kl_config(RLTrainer_source, RLConfig_source):
+def grpo_trainer_kl_clip_config(RLTrainer_source, RLConfig_source):
     if "beta" not in RLConfig_source: return ""
     
-    adaptive_kl_config = \
+    kl_clip_config = \
     "# KL clipping configuration\n"\
-    "if kl_adaptation_method not in ['none', 'hard', 'soft']:\n"\
-    "    raise ValueError(f'Unsloth: kl_adaptation_method must be one of: none, hard, soft. Got: {kl_adaptation_method}')\n"\
-    "print(f'Unsloth: Using KL clipping method: {kl_adaptation_method}')\n"\
-    "if kl_adaptation_method in ['hard', 'soft']:\n"\
-    "    print(f'Unsloth: KL clip threshold: {kl_clip_threshold}')\n"\
-    "    if kl_adaptation_method == 'hard':\n"\
-    "        print(f'Unsloth: Using hard clipping: max(0, KL - {kl_clip_threshold})')\n"\
+    "if kl_clip_method not in ['none', 'hard', 'soft']:\n"\
+    "    raise ValueError(f'Unsloth: kl_clip_method must be one of: none, hard, soft. Got: {kl_clip_method}')\n"\
+    "print(f'Unsloth: Using KL clipping method: {kl_clip_method}')\n"\
+    "if kl_clip_method in ['hard', 'soft']:\n"\
+    "    use_per_token_kl_threshold = locals().get('use_per_token_kl_threshold', True)\n"\
+    "    threshold_type = 'per-token' if use_per_token_kl_threshold else 'total'\n"\
+    "    print(f'Unsloth: KL clip threshold: {kl_clip_threshold} ({threshold_type})')\n"\
+    "    if use_per_token_kl_threshold:\n"\
+    "        print(f'Unsloth: Using {threshold_type} threshold - will be scaled by reference sequence length')\n"\
     "    else:\n"\
-    "        print(f'Unsloth: Using soft clipping: F.softplus(KL - {kl_clip_threshold})')\n"
+    "        print(f'Unsloth: Using {threshold_type} threshold - applied directly to total KL')\n"\
+    "    if kl_clip_method == 'hard':\n"\
+    "        print(f'Unsloth: Using hard clipping: max(0, KL - threshold)')\n"\
+    "    else:\n"\
+    "        print(f'Unsloth: Using soft clipping: F.softplus(KL - threshold)')\n"
     
-    return adaptive_kl_config
+    return kl_clip_config
 pass
-RL_CONFIG_CHANGES["grpo_trainer"].append(grpo_trainer_adaptive_kl_config)
+RL_CONFIG_CHANGES["grpo_trainer"].append(grpo_trainer_kl_clip_config)
 
 
 # Add other reward function names
@@ -710,13 +758,13 @@ pass
 RL_METRICS_CHANGES["grpo_trainer"].append(grpo_trainer_metrics)
 
 
-# Add adaptive KL metrics tracking
-def grpo_trainer_adaptive_kl_metrics(RLTrainer_source, RLConfig_source):
-    if "adaptive KL" not in RLTrainer_source: return ""
+# Add KL clipping metrics tracking
+def grpo_trainer_kl_clip_metrics(RLTrainer_source, RLConfig_source):
+    if "KL clipping" not in RLTrainer_source: return ""
     
-    adaptive_kl_metrics = \
-    "other_metrics.extend(['adaptive_kl/raw_kl', 'adaptive_kl/adapted_kl', 'adaptive_kl/current_beta'])\n"
+    kl_clip_metrics = \
+    "other_metrics.extend(['kl_clip/raw_kl', 'kl_clip/clipped_kl', 'kl_clip/current_beta'])\n"
     
-    return adaptive_kl_metrics
+    return kl_clip_metrics
 pass
-RL_METRICS_CHANGES["grpo_trainer"].append(grpo_trainer_adaptive_kl_metrics)
+RL_METRICS_CHANGES["grpo_trainer"].append(grpo_trainer_kl_clip_metrics)

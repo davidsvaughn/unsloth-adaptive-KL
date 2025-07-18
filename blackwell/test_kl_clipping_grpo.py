@@ -269,7 +269,7 @@ common_args = {
 }
 
 print("\n" + "="*60)
-print("SIMPLE KL CLIPPING DEMONSTRATION")
+print("KL CLIPPING DEMONSTRATION WITH PER-TOKEN THRESHOLDS")
 print("="*60)
 
 # 1. Baseline (no clipping)
@@ -278,7 +278,7 @@ print("-" * 30)
 
 training_args_baseline = GRPOConfig(
     output_dir="outputs_baseline",
-    kl_adaptation_method="none",  # No clipping
+    kl_clip_method="none",  # No clipping
     **common_args
 )
 
@@ -293,14 +293,61 @@ trainer_baseline = GRPOTrainer(
 print("Training with baseline (no KL clipping)...")
 trainer_baseline.train()
 
-# 2. Hard clipping
-print("\n2. HARD CLIPPING - max(0, KL - threshold)")
+# 2. Per-token soft clipping (recommended)
+print("\n2. PER-TOKEN SOFT CLIPPING - Scaled by reference length")
+print("-" * 30)
+
+training_args_per_token = GRPOConfig(
+    output_dir="outputs_per_token",
+    kl_clip_method="soft",           # Soft clipping
+    kl_clip_threshold=0.1,                # 0.1 nats per token
+    use_per_token_kl_threshold=True,      # Scale by reference length
+    **common_args
+)
+
+trainer_per_token = GRPOTrainer(
+    model=model,
+    processing_class=tokenizer,
+    reward_funcs=[match_format_exactly, check_answer],
+    args=training_args_per_token,
+    train_dataset=dataset,
+)
+
+print("Training with per-token KL clipping (0.1 nats per token)...")
+trainer_per_token.train()
+
+# 3. Total KL threshold (legacy behavior)
+print("\n3. TOTAL KL THRESHOLD - Direct threshold application")
+print("-" * 30)
+
+training_args_total = GRPOConfig(
+    output_dir="outputs_total",
+    kl_clip_method="soft",           # Soft clipping
+    kl_clip_threshold=5.0,                # 5.0 total nats
+    use_per_token_kl_threshold=False,     # Use threshold directly
+    **common_args
+)
+
+trainer_total = GRPOTrainer(
+    model=model,
+    processing_class=tokenizer,
+    reward_funcs=[match_format_exactly, check_answer],
+    args=training_args_total,
+    train_dataset=dataset,
+)
+
+print("Training with total KL clipping (5.0 total nats)...")
+trainer_total.train()
+
+# 4. Hard clipping with per-token threshold
+print("\n4. PER-TOKEN HARD CLIPPING - Sharp cutoff scaled by length")
 print("-" * 30)
 
 training_args_hard = GRPOConfig(
     output_dir="outputs_hard_clip",
-    kl_adaptation_method="hard",  # Hard clipping
-    kl_clip_threshold=0.5,       # Threshold for clipping
+    kl_clip_method="hard",          # Hard clipping
+    kl_clip_threshold=0.15,               # 0.15 nats per token
+    use_per_token_kl_threshold=True,      # Scale by reference length
     **common_args
 )
 
@@ -312,38 +359,20 @@ trainer_hard = GRPOTrainer(
     train_dataset=dataset,
 )
 
-print("Training with hard KL clipping (threshold=0.5)...")
+print("Training with hard per-token KL clipping (0.15 nats per token)...")
 trainer_hard.train()
-
-# 3. Soft clipping
-print("\n3. SOFT CLIPPING - F.softplus(KL - threshold)")
-print("-" * 30)
-
-training_args_soft = GRPOConfig(
-    output_dir="outputs_soft_clip",
-    kl_adaptation_method="soft",  # Soft clipping
-    kl_clip_threshold=0.5,       # Threshold for clipping
-    **common_args
-)
-
-trainer_soft = GRPOTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=[match_format_exactly, check_answer],
-    args=training_args_soft,
-    train_dataset=dataset,
-)
-
-print("Training with soft KL clipping (threshold=0.5)...")
-trainer_soft.train()
 
 print("\n" + "="*60)
 print("KL CLIPPING DEMONSTRATION COMPLETE!")
 print("="*60)
 print("Methods demonstrated:")
 print("1. Baseline - No clipping (standard GRPO)")
-print("2. Hard clipping - max(0, KL - threshold)")
-print("3. Soft clipping - F.softplus(KL - threshold)")
-print("\nBoth clipping methods help prevent pathological length")
-print("exploitation in GRPO training.")
+print("2. Per-token soft clipping - F.softplus(KL - per_token_threshold * length)")
+print("3. Total KL threshold - F.softplus(KL - total_threshold)")
+print("4. Per-token hard clipping - max(0, KL - per_token_threshold * length)")
+print("\nBenefits of per-token thresholds:")
+print("- Intuitive threshold setting (nats per token)")
+print("- Length-agnostic behavior")
+print("- Transferable across different tasks")
+print("- Prevents gaming by generating longer sequences")
 print("="*60)
