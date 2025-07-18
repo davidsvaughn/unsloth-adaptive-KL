@@ -136,15 +136,15 @@ class Unsloth{RLConfig_name}({RLConfig_name}):
     # KL clipping parameters
     kl_clip_method: Optional[str] = field(
         default = 'none',
-        metadata = {'help': 'Method for KL clipping: none, hard, soft'},
+        metadata = {{'help': 'Method for KL clipping: none, hard, soft'}},
     )
     kl_clip_threshold: Optional[float] = field(
         default = 0.01,
-        metadata = {'help': 'Threshold for clipping KL divergence'},
+        metadata = {{'help': 'Threshold for clipping KL divergence'}},
     )
     use_per_token_kl_threshold: Optional[bool] = field(
         default = True,
-        metadata = {'help': 'If True, threshold is per-token and scaled by reference length'},
+        metadata = {{'help': 'If True, threshold is per-token and scaled by reference length'}},
     )
     def __init__({RLConfig_arguments},
         vllm_sampling_params = None,

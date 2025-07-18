@@ -405,7 +405,7 @@ grpo_accumulated_loss  = RL_REPLACEMENTS["grpo_accumulated_loss"]
 
 # Simple KL clipping functions
 def kl_hard_clip(kl_divergence, kl_clip_threshold, reference_length=None, use_per_token_threshold=True):
-    """Hard clipping using ReLU-like function: max(0, KL - threshold).
+    """Hard clipping using ReLU: F.relu(KL - threshold).
     
     Args:
         kl_divergence: Total KL divergence to clip
@@ -413,6 +413,8 @@ def kl_hard_clip(kl_divergence, kl_clip_threshold, reference_length=None, use_pe
         reference_length: Reference sequence length for per-token threshold calculation
         use_per_token_threshold: If True, interpret threshold as per-token and scale by reference_length
     """
+    import torch.nn.functional as F
+    
     if use_per_token_threshold and reference_length is not None:
         # Convert per-token threshold to total threshold based on reference length
         total_threshold = kl_clip_threshold * reference_length
@@ -420,7 +422,7 @@ def kl_hard_clip(kl_divergence, kl_clip_threshold, reference_length=None, use_pe
         # Use threshold directly as total KL threshold
         total_threshold = kl_clip_threshold
     
-    return torch.clamp(kl_divergence - total_threshold, min=0.0)
+    return F.relu(kl_divergence - total_threshold)
 
 def kl_soft_clip(kl_divergence, kl_clip_threshold, reference_length=None, use_per_token_threshold=True):
     """Soft clipping using softplus: F.softplus(KL - threshold).
@@ -720,7 +722,7 @@ def grpo_trainer_kl_clip_config(RLTrainer_source, RLConfig_source):
     "    else:\n"\
     "        print(f'Unsloth: Using {threshold_type} threshold - applied directly to total KL')\n"\
     "    if kl_clip_method == 'hard':\n"\
-    "        print(f'Unsloth: Using hard clipping: max(0, KL - threshold)')\n"\
+    "        print(f'Unsloth: Using hard clipping: F.relu(KL - threshold)')\n"\
     "    else:\n"\
     "        print(f'Unsloth: Using soft clipping: F.softplus(KL - threshold)')\n"
     

@@ -19,7 +19,7 @@ This implementation provides two simple methods to prevent pathological KL explo
 ### 1. **Hard Clipping** (`kl_clip_method="hard"`)
 Uses a ReLU-like function to clip KL divergence:
 ```python
-kl_term = max(0, KL(p || p_ref) - kl_clip_threshold)
+kl_term = F.relu(KL(p || p_ref) - kl_clip_threshold)
 ```
 
 **Use case:** When you want to completely eliminate KL values below the threshold while preserving gradient flow above it.
@@ -126,7 +126,7 @@ training_args = GRPOConfig(
 | Method | Function | Gradient Behavior | Use Case |
 |--------|----------|-------------------|----------|
 | **None** | `KL(p \|\| p_ref)` | Standard | Baseline GRPO |
-| **Hard** | `max(0, KL - threshold)` | Zero below threshold | Sharp cutoff |
+| **Hard** | `F.relu(KL - threshold)` | Zero below threshold | Sharp cutoff |
 | **Soft** | `F.softplus(KL - threshold)` | Smooth everywhere | Gradual reduction |
 
 ## Complete Example
@@ -158,7 +158,7 @@ The KL clipping functionality is implemented in:
 ## Mathematical Details
 
 ### Hard Clipping
-- **Function**: `max(0, KL - threshold)`
+- **Function**: `F.relu(KL - threshold) = max(0, KL - threshold)`
 - **Gradient**: 0 when `KL < threshold`, 1 when `KL > threshold`
 - **Effect**: Completely removes KL penalty below threshold
 
