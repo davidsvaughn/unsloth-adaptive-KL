@@ -1,7 +1,6 @@
 """
-Example script demonstrating the new adaptive KL functionality for GRPO training.
-This script shows how to use the different KL adaptation methods to prevent
-pathological length exploitation in GRPO training.
+Simple KL clipping demonstration for GRPO training.
+Shows baseline (no clipping), hard clipping, and soft clipping methods.
 """
 
 from unsloth import FastLanguageModel
@@ -23,19 +22,15 @@ model = FastLanguageModel.get_peft_model(
     model,
     r=lora_rank,
     target_modules=[
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
     ],
     lora_alpha=lora_rank * 2,
     use_gradient_checkpointing="unsloth",
     random_state=3407,
 )
 
+# Setup chat template and dataset
 reasoning_start = "<start_working_out>"
 reasoning_end = "<end_working_out>"
 solution_start = "<SOLUTION>"
@@ -251,32 +246,40 @@ vllm_sampling_params = SamplingParams(
     include_stop_str_in_output=True,
 )
 
-# Demonstrate different adaptive KL methods
+# Common training arguments
 from trl import GRPOConfig, GRPOTrainer
 
-print("\n" + "="*50)
-print("DEMO: No adaptive KL (baseline)")
-print("="*50)
+common_args = {
+    "vllm_sampling_params": vllm_sampling_params,
+    "temperature": 1.0,
+    "learning_rate": 5e-6,
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.1,
+    "lr_scheduler_type": "linear",
+    "optim": "adamw_8bit",
+    "logging_steps": 1,
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 1,
+    "num_generations": 4,
+    "max_prompt_length": max_prompt_length,
+    "max_completion_length": max_completion_length,
+    "max_steps": 3,
+    "save_steps": 100,
+    "report_to": "none",
+}
+
+print("\n" + "="*60)
+print("SIMPLE KL CLIPPING DEMONSTRATION")
+print("="*60)
+
+# 1. Baseline (no clipping)
+print("\n1. BASELINE - No KL clipping")
+print("-" * 30)
 
 training_args_baseline = GRPOConfig(
-    vllm_sampling_params=vllm_sampling_params,
-    temperature=1.0,
-    learning_rate=5e-6,
-    weight_decay=0.01,
-    warmup_ratio=0.1,
-    lr_scheduler_type="linear",
-    optim="adamw_8bit",
-    logging_steps=1,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=1,
-    num_generations=4,
-    max_prompt_length=max_prompt_length,
-    max_completion_length=max_completion_length,
-    max_steps=3,
-    save_steps=100,
-    report_to="none",
     output_dir="outputs_baseline",
-    # No adaptive KL - using default 'none'
+    kl_adaptation_method="none",  # No clipping
+    **common_args
 )
 
 trainer_baseline = GRPOTrainer(
@@ -287,173 +290,60 @@ trainer_baseline = GRPOTrainer(
     train_dataset=dataset,
 )
 
-print("Training with baseline (no adaptive KL)...")
+print("Training with baseline (no KL clipping)...")
 trainer_baseline.train()
 
-print("\n" + "="*50)
-print("DEMO: KL Clipping Method")
-print("="*50)
+# 2. Hard clipping
+print("\n2. HARD CLIPPING - max(0, KL - threshold)")
+print("-" * 30)
 
-training_args_clip = GRPOConfig(
-    vllm_sampling_params=vllm_sampling_params,
-    temperature=1.0,
-    learning_rate=5e-6,
-    weight_decay=0.01,
-    warmup_ratio=0.1,
-    lr_scheduler_type="linear",
-    optim="adamw_8bit",
-    logging_steps=1,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=1,
-    num_generations=4,
-    max_prompt_length=max_prompt_length,
-    max_completion_length=max_completion_length,
-    max_steps=3,
-    save_steps=100,
-    report_to="none",
-    output_dir="outputs_clip",
-    # Adaptive KL: Clipping method
-    kl_adaptation_method="clip",
-    kl_clip_threshold=0.5,  # Clip KL at 0.5
+training_args_hard = GRPOConfig(
+    output_dir="outputs_hard_clip",
+    kl_adaptation_method="hard",  # Hard clipping
+    kl_clip_threshold=0.5,       # Threshold for clipping
+    **common_args
 )
 
-trainer_clip = GRPOTrainer(
+trainer_hard = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=[match_format_exactly, check_answer],
-    args=training_args_clip,
+    args=training_args_hard,
     train_dataset=dataset,
 )
 
-print("Training with KL clipping (threshold=0.5)...")
-trainer_clip.train()
+print("Training with hard KL clipping (threshold=0.5)...")
+trainer_hard.train()
 
-print("\n" + "="*50)
-print("DEMO: Length-Normalized KL")
-print("="*50)
+# 3. Soft clipping
+print("\n3. SOFT CLIPPING - F.softplus(KL - threshold)")
+print("-" * 30)
 
-training_args_length = GRPOConfig(
-    vllm_sampling_params=vllm_sampling_params,
-    temperature=1.0,
-    learning_rate=5e-6,
-    weight_decay=0.01,
-    warmup_ratio=0.1,
-    lr_scheduler_type="linear",
-    optim="adamw_8bit",
-    logging_steps=1,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=1,
-    num_generations=4,
-    max_prompt_length=max_prompt_length,
-    max_completion_length=max_completion_length,
-    max_steps=3,
-    save_steps=100,
-    report_to="none",
-    output_dir="outputs_length_norm",
-    # Adaptive KL: Length normalization
-    kl_adaptation_method="length_normalized",
+training_args_soft = GRPOConfig(
+    output_dir="outputs_soft_clip",
+    kl_adaptation_method="soft",  # Soft clipping
+    kl_clip_threshold=0.5,       # Threshold for clipping
+    **common_args
 )
 
-trainer_length = GRPOTrainer(
+trainer_soft = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=[match_format_exactly, check_answer],
-    args=training_args_length,
+    args=training_args_soft,
     train_dataset=dataset,
 )
 
-print("Training with length-normalized KL...")
-trainer_length.train()
+print("Training with soft KL clipping (threshold=0.5)...")
+trainer_soft.train()
 
-print("\n" + "="*50)
-print("DEMO: Dynamic Beta Scheduling")
-print("="*50)
-
-training_args_dynamic = GRPOConfig(
-    vllm_sampling_params=vllm_sampling_params,
-    temperature=1.0,
-    learning_rate=5e-6,
-    weight_decay=0.01,
-    warmup_ratio=0.1,
-    lr_scheduler_type="linear",
-    optim="adamw_8bit",
-    logging_steps=1,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=1,
-    num_generations=4,
-    max_prompt_length=max_prompt_length,
-    max_completion_length=max_completion_length,
-    max_steps=5,  # More steps to see dynamic behavior
-    save_steps=100,
-    report_to="none",
-    output_dir="outputs_dynamic",
-    # Adaptive KL: Dynamic beta scheduling
-    kl_adaptation_method="dynamic",
-    dynamic_beta_decay=0.8,  # Decay beta by 20% each time
-    reward_threshold=1.0,    # When average reward > 1.0
-    beta_min=0.001,         # Minimum beta value
-    beta_schedule_steps=3,  # After 3 steps, set beta to minimum
-)
-
-trainer_dynamic = GRPOTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=[match_format_exactly, check_answer],
-    args=training_args_dynamic,
-    train_dataset=dataset,
-)
-
-print("Training with dynamic beta scheduling...")
-trainer_dynamic.train()
-
-print("\n" + "="*50)
-print("DEMO: Sigmoid KL Clipping")
-print("="*50)
-
-training_args_sigmoid = GRPOConfig(
-    vllm_sampling_params=vllm_sampling_params,
-    temperature=1.0,
-    learning_rate=5e-6,
-    weight_decay=0.01,
-    warmup_ratio=0.1,
-    lr_scheduler_type="linear",
-    optim="adamw_8bit",
-    logging_steps=1,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=1,
-    num_generations=4,
-    max_prompt_length=max_prompt_length,
-    max_completion_length=max_completion_length,
-    max_steps=3,
-    save_steps=100,
-    report_to="none",
-    output_dir="outputs_sigmoid",
-    # Adaptive KL: Sigmoid clipping
-    kl_adaptation_method="sigmoid",
-    kl_target=0.2,  # Target KL divergence
-)
-
-trainer_sigmoid = GRPOTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=[match_format_exactly, check_answer],
-    args=training_args_sigmoid,
-    train_dataset=dataset,
-)
-
-print("Training with sigmoid KL clipping (target=0.2)...")
-trainer_sigmoid.train()
-
-print("\n" + "="*50)
-print("ADAPTIVE KL DEMO COMPLETE!")
-print("="*50)
+print("\n" + "="*60)
+print("KL CLIPPING DEMONSTRATION COMPLETE!")
+print("="*60)
 print("Methods demonstrated:")
-print("1. Baseline (no adaptation)")
-print("2. KL Clipping - clips KL values at threshold")
-print("3. Length Normalization - normalizes KL by sequence length")
-print("4. Dynamic Beta - adjusts beta based on reward convergence")
-print("5. Sigmoid Clipping - soft clipping with sigmoid function")
-print()
-print("Each method helps prevent pathological length exploitation")
-print("where models generate longer sequences to reduce KL divergence.")
-print("="*50)
+print("1. Baseline - No clipping (standard GRPO)")
+print("2. Hard clipping - max(0, KL - threshold)")
+print("3. Soft clipping - F.softplus(KL - threshold)")
+print("\nBoth clipping methods help prevent pathological length")
+print("exploitation in GRPO training.")
+print("="*60)

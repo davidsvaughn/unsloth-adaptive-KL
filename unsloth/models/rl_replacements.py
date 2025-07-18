@@ -403,54 +403,18 @@ grpo_compute_loss_slow = RL_REPLACEMENTS["grpo_compute_loss_slow"]
 UnslothEfficientGRPO   = RL_REPLACEMENTS["UnslothEfficientGRPO"]
 grpo_accumulated_loss  = RL_REPLACEMENTS["grpo_accumulated_loss"]
 
-# Adaptive KL utility functions
-def adaptive_kl_clip(kl_divergence, kl_clip_threshold):
-    """Clip KL divergence to prevent pathological exploitation."""
-    return torch.clamp(kl_divergence, max=kl_clip_threshold)
+# Simple KL clipping functions
+def adaptive_kl_hard_clip(kl_divergence, kl_clip_threshold):
+    """Hard clipping using ReLU-like function: max(0, KL - threshold)."""
+    return torch.clamp(kl_divergence - kl_clip_threshold, min=0.0)
 
-def adaptive_kl_sigmoid(kl_divergence, kl_target):
-    """Apply sigmoid-based soft clipping to KL divergence."""
-    return torch.sigmoid(kl_divergence - kl_target) * kl_divergence
-
-def adaptive_kl_length_normalized(kl_divergence, completion_length):
-    """Normalize KL divergence by sequence length."""
-    return kl_divergence / completion_length.unsqueeze(1)
-
-def adaptive_kl_dynamic_beta(trainer, mean_reward, step):
-    """Dynamically adjust beta based on reward convergence."""
-    args = trainer.args
-    current_beta = trainer.beta
-    
-    # Initialize tracking if not exists
-    if not hasattr(trainer, '_adaptive_kl_state'):
-        trainer._adaptive_kl_state = {
-            'reward_history': [],
-            'original_beta': current_beta,
-            'current_beta': current_beta,
-        }
-    
-    state = trainer._adaptive_kl_state
-    state['reward_history'].append(mean_reward)
-    
-    # Keep only recent reward history
-    if len(state['reward_history']) > 100:
-        state['reward_history'] = state['reward_history'][-100:]
-    
-    # Check if we should decay beta
-    if len(state['reward_history']) >= 10:
-        recent_reward = sum(state['reward_history'][-10:]) / 10
-        if recent_reward > args.reward_threshold:
-            state['current_beta'] *= args.dynamic_beta_decay
-            state['current_beta'] = max(state['current_beta'], args.beta_min)
-    
-    # Step-based schedule
-    if step > args.beta_schedule_steps:
-        state['current_beta'] = args.beta_min
-    
-    return state['current_beta']
+def adaptive_kl_soft_clip(kl_divergence, kl_clip_threshold):
+    """Soft clipping using softplus: F.softplus(KL - threshold)."""
+    import torch.nn.functional as F
+    return F.softplus(kl_divergence - kl_clip_threshold)
 
 def apply_adaptive_kl(trainer, raw_kl, completion_length, mean_reward=None, step=None):
-    """Apply adaptive KL modifications based on configuration."""
+    """Apply KL clipping based on configuration."""
     args = trainer.args
     method = getattr(args, 'kl_adaptation_method', 'none')
     
@@ -460,18 +424,10 @@ def apply_adaptive_kl(trainer, raw_kl, completion_length, mean_reward=None, step
     adapted_kl = raw_kl
     current_beta = trainer.beta
     
-    if method == 'clip':
-        adapted_kl = adaptive_kl_clip(raw_kl, args.kl_clip_threshold)
-    elif method == 'sigmoid':
-        adapted_kl = adaptive_kl_sigmoid(raw_kl, args.kl_target)
-    elif method == 'length_normalized':
-        adapted_kl = adaptive_kl_length_normalized(raw_kl, completion_length)
-    elif method == 'dynamic':
-        if mean_reward is not None and step is not None:
-            current_beta = adaptive_kl_dynamic_beta(trainer, mean_reward, step)
-        else:
-            # Fallback to original beta if reward/step not available
-            current_beta = trainer.beta
+    if method == 'hard':
+        adapted_kl = adaptive_kl_hard_clip(raw_kl, args.kl_clip_threshold)
+    elif method == 'soft':
+        adapted_kl = adaptive_kl_soft_clip(raw_kl, args.kl_clip_threshold)
     
     return adapted_kl, current_beta
 
@@ -479,10 +435,8 @@ RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(grpo_compute_loss))
 RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(UnslothEfficientGRPO))
 RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(grpo_accumulated_loss))
 RL_PRE_ITEMS["grpo_trainer"].append(grpo_compute_loss_slow)
-RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_clip))
-RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_sigmoid))
-RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_length_normalized))
-RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_dynamic_beta))
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_hard_clip))
+RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(adaptive_kl_soft_clip))
 RL_PRE_ITEMS["grpo_trainer"].append(inspect.getsource(apply_adaptive_kl))
 
 # Edit _get_per_token_logps to handle mixed precision and add adaptive KL
@@ -704,30 +658,21 @@ pass
 RL_CONFIG_CHANGES["grpo_trainer"].append(grpo_trainer_fix_batch_size)
 
 
-# Add adaptive KL configuration parameters and validation
+# Add simplified KL clipping configuration parameters and validation
 def grpo_trainer_adaptive_kl_config(RLTrainer_source, RLConfig_source):
     if "beta" not in RLConfig_source: return ""
     
     adaptive_kl_config = \
-    "# Adaptive KL configuration\n"\
-    "kl_adaptation_method = getattr(locals(), 'kl_adaptation_method', 'none')\n"\
-    "if kl_adaptation_method not in ['none', 'clip', 'sigmoid', 'dynamic', 'length_normalized']:\n"\
-    "    raise ValueError(f'Unsloth: kl_adaptation_method must be one of: none, clip, sigmoid, dynamic, length_normalized. Got: {kl_adaptation_method}')\n"\
-    "kl_clip_threshold = getattr(locals(), 'kl_clip_threshold', 1.0)\n"\
-    "kl_target = getattr(locals(), 'kl_target', 0.1)\n"\
-    "dynamic_beta_decay = getattr(locals(), 'dynamic_beta_decay', 0.9)\n"\
-    "reward_threshold = getattr(locals(), 'reward_threshold', 0.8)\n"\
-    "beta_min = getattr(locals(), 'beta_min', 0.0)\n"\
-    "beta_schedule_steps = getattr(locals(), 'beta_schedule_steps', 1000)\n"\
-    "print(f'Unsloth: Using adaptive KL method: {kl_adaptation_method}')\n"\
-    "if kl_adaptation_method == 'clip':\n"\
+    "# KL clipping configuration\n"\
+    "if kl_adaptation_method not in ['none', 'hard', 'soft']:\n"\
+    "    raise ValueError(f'Unsloth: kl_adaptation_method must be one of: none, hard, soft. Got: {kl_adaptation_method}')\n"\
+    "print(f'Unsloth: Using KL clipping method: {kl_adaptation_method}')\n"\
+    "if kl_adaptation_method in ['hard', 'soft']:\n"\
     "    print(f'Unsloth: KL clip threshold: {kl_clip_threshold}')\n"\
-    "elif kl_adaptation_method == 'sigmoid':\n"\
-    "    print(f'Unsloth: KL target: {kl_target}')\n"\
-    "elif kl_adaptation_method == 'dynamic':\n"\
-    "    print(f'Unsloth: Dynamic beta decay: {dynamic_beta_decay}, reward threshold: {reward_threshold}')\n"\
-    "elif kl_adaptation_method == 'length_normalized':\n"\
-    "    print(f'Unsloth: Using length-normalized KL')\n"
+    "    if kl_adaptation_method == 'hard':\n"\
+    "        print(f'Unsloth: Using hard clipping: max(0, KL - {kl_clip_threshold})')\n"\
+    "    else:\n"\
+    "        print(f'Unsloth: Using soft clipping: F.softplus(KL - {kl_clip_threshold})')\n"
     
     return adaptive_kl_config
 pass
