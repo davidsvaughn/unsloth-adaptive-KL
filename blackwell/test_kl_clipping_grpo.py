@@ -293,14 +293,39 @@ trainer_baseline = GRPOTrainer(
 print("Training with baseline (no KL clipping)...")
 trainer_baseline.train()
 
-# 2. Per-token soft clipping (recommended)
-print("\n2. PER-TOKEN SOFT CLIPPING - Scaled by reference length")
+
+# 2. Hard clipping with per-token threshold
+print("\n2. PER-TOKEN HARD CLIPPING - Sharp cutoff scaled by length")
+print("-" * 30)
+
+training_args_hard = GRPOConfig(
+    output_dir="outputs_hard_clip",
+    kl_clip_method="hard",          # Hard clipping
+    kl_clip_threshold=0.01,               # 0.01 nats per token
+    use_per_token_kl_threshold=True,      # Scale by reference length
+    **common_args
+)
+
+trainer_hard = GRPOTrainer(
+    model=model,
+    processing_class=tokenizer,
+    reward_funcs=[match_format_exactly, check_answer],
+    args=training_args_hard,
+    train_dataset=dataset,
+)
+
+print("Training with hard per-token KL clipping (0.01 nats per token)...")
+trainer_hard.train()
+
+
+# 3. Per-token soft clipping (recommended)
+print("\n3. PER-TOKEN SOFT CLIPPING - Smooth cutoff scaled by length")
 print("-" * 30)
 
 training_args_per_token = GRPOConfig(
     output_dir="outputs_per_token",
     kl_clip_method="soft",           # Soft clipping
-    kl_clip_threshold=0.1,                # 0.1 nats per token
+    kl_clip_threshold=0.01,                # 0.01 nats per token
     use_per_token_kl_threshold=True,      # Scale by reference length
     **common_args
 )
@@ -313,11 +338,12 @@ trainer_per_token = GRPOTrainer(
     train_dataset=dataset,
 )
 
-print("Training with per-token KL clipping (0.1 nats per token)...")
+print("Training with per-token KL clipping (0.01 nats per token)...")
 trainer_per_token.train()
 
-# 3. Total KL threshold (legacy behavior)
-print("\n3. TOTAL KL THRESHOLD - Direct threshold application")
+
+# 4. Total KL threshold (legacy behavior)
+print("\n4. TOTAL KL THRESHOLD - Direct threshold application")
 print("-" * 30)
 
 training_args_total = GRPOConfig(
@@ -339,28 +365,6 @@ trainer_total = GRPOTrainer(
 print("Training with total KL clipping (5.0 total nats)...")
 trainer_total.train()
 
-# 4. Hard clipping with per-token threshold
-print("\n4. PER-TOKEN HARD CLIPPING - Sharp cutoff scaled by length")
-print("-" * 30)
-
-training_args_hard = GRPOConfig(
-    output_dir="outputs_hard_clip",
-    kl_clip_method="hard",          # Hard clipping
-    kl_clip_threshold=0.15,               # 0.15 nats per token
-    use_per_token_kl_threshold=True,      # Scale by reference length
-    **common_args
-)
-
-trainer_hard = GRPOTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=[match_format_exactly, check_answer],
-    args=training_args_hard,
-    train_dataset=dataset,
-)
-
-print("Training with hard per-token KL clipping (0.15 nats per token)...")
-trainer_hard.train()
 
 print("\n" + "="*60)
 print("KL CLIPPING DEMONSTRATION COMPLETE!")

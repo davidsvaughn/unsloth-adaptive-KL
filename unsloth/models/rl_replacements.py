@@ -706,11 +706,13 @@ def grpo_trainer_kl_clip_config(RLTrainer_source, RLConfig_source):
     
     kl_clip_config = \
     "# KL clipping configuration\n"\
+    "kl_clip_method = locals().get('kl_clip_method', 'none')\n"\
     "if kl_clip_method not in ['none', 'hard', 'soft']:\n"\
     "    raise ValueError(f'Unsloth: kl_clip_method must be one of: none, hard, soft. Got: {kl_clip_method}')\n"\
     "print(f'Unsloth: Using KL clipping method: {kl_clip_method}')\n"\
     "if kl_clip_method in ['hard', 'soft']:\n"\
     "    use_per_token_kl_threshold = locals().get('use_per_token_kl_threshold', True)\n"\
+    "    kl_clip_threshold = locals().get('kl_clip_threshold', 0.01)\n"\
     "    threshold_type = 'per-token' if use_per_token_kl_threshold else 'total'\n"\
     "    print(f'Unsloth: KL clip threshold: {kl_clip_threshold} ({threshold_type})')\n"\
     "    if use_per_token_kl_threshold:\n"\
